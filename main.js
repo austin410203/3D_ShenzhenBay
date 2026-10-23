@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { Reflector } from 'three/addons/objects/Reflector.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { makeHuman, poseWalk, poseIdle, makeCyclist, poseRide } from './people.js';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
@@ -17,6 +18,9 @@ renderer.setPixelRatio(DPR);
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.autoUpdate = false;
 document.body.prepend(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -326,16 +330,16 @@ const postMat = new THREE.ShaderMaterial({
       float tq = floor(uTime * 5.0);                       // lines "boil" at 5 fps like redrawn frames
       vec2 wob = (vec2(vn(vUv*vec2(11.0, 8.0) + tq*1.7), vn(vUv*vec2(9.0, 13.0) - tq*2.3)) - 0.5) * 3.2 * px;
       vec2 uv = vUv + wob;
-      // Kuwahara (4 quadrants, r=3): flat painterly washes with soft edges
+      // Kuwahara (4 quadrants, r=2): flat painterly washes with soft edges
       vec3 m[4]; vec3 s2[4];
       for (int k = 0; k < 4; k++) { m[k] = vec3(0.0); s2[k] = vec3(0.0); }
-      for (int j = 0; j <= 3; j++) for (int i = 0; i <= 3; i++) {
+      for (int j = 0; j <= 2; j++) for (int i = 0; i <= 2; i++) {
         vec3 a = tex(uv + vec2(-i, -j)*px), b = tex(uv + vec2(i, -j)*px), c = tex(uv + vec2(-i, j)*px), d = tex(uv + vec2(i, j)*px);
         m[0] += a; s2[0] += a*a; m[1] += b; s2[1] += b*b; m[2] += c; s2[2] += c*c; m[3] += d; s2[3] += d*d;
       }
       vec3 col = vec3(0.0); float best = 1e9;
       for (int k = 0; k < 4; k++) {
-        vec3 mu = m[k] / 16.0; vec3 v = abs(s2[k] / 16.0 - mu*mu);
+        vec3 mu = m[k] / 9.0; vec3 v = abs(s2[k] / 9.0 - mu*mu);
         float sv = v.r + v.g + v.b;
         if (sv < best) { best = sv; col = mu; }
       }
@@ -416,11 +420,28 @@ function farMaterial() {
           base = mix(base, vec3(0.38,0.30,0.26), step(0.72, fract(seed*5.17)) * 0.8) * (kind > 0.5 ? 1.15 : 1.0); }
         else if (kind < 2.5) base = vec3(0.13,0.17,0.15);
         else base = vec3(0.10,0.12,0.11);
+        float concrete = kind < 0.5 ? step(fract(seed*11.3), 0.34) : 0.0;
+        if (concrete > 0.5) base = mix(vec3(0.42,0.40,0.37), vec3(0.52,0.48,0.42), fract(seed*3.7));
         float diff = max(dot(N, uSunDir), 0.0);
         vec3 V = vW - cameraPosition; float dist = length(V); vec3 dir = V / dist;
-        vec3 col = base * 0.7 * (uAmb * (0.45 + 0.35*max(N.y, 0.0)) + uSunCol * diff * 0.1);
-        // glass picks up a little of the sky
-        if (kind < 1.5) col += skyColor(reflect(dir, N) * vec3(1.0, sign(reflect(dir, N).y) , 1.0)) * 0.04 * (1.0 - N.y);
+        vec3 col = base * 0.7 * (uAmb * (0.45 + 0.35*max(N.y, 0.0)) + uSunCol * diff * (0.1 + concrete*0.18));
+        if (kind < 1.5 && N.y < 0.5) {
+          // floor slabs and mullions, faded out once they get sub-pixel
+          float u = vW.x * (-N.z) + vW.z * N.x;
+          float fy = vW.y / (concrete > 0.5 ? 3.0 : 4.0);
+          float aa = fwidth(fy);
+          float fl = smoothstep(0.0, 0.14 + aa, fract(fy)) * smoothstep(1.0, 0.8 - aa, fract(fy));
+          float mull = smoothstep(0.06, 0.16, fract(u / (concrete > 0.5 ? 3.2 : 1.6)));
+          float vis = 1.0 - smoothstep(0.3, 0.85, aa);
+          col *= mix(1.0, mix(concrete > 0.5 ? 0.62 : 0.78, 1.0, fl) * mix(0.88, 1.0, mull), vis);
+          // glass: fresnel sky reflection + warm sunset glints
+          vec3 R = reflect(dir, N);
+          float F = (1.0 - concrete) * (0.06 + 0.5 * pow(1.0 - max(dot(-dir, N), 0.0), 4.0));
+          col += skyColor(vec3(R.x, abs(R.y), R.z)) * F * 0.35;
+          col += uSunCol * pow(max(dot(R, uSunDir), 0.0), 60.0) * (1.0 - concrete) * 0.25 * fl;
+        }
+        // contact darkening toward the street
+        if (kind < 1.5) col *= mix(0.6, 1.0, smoothstep(0.0, 70.0, vW.y));
         if (kind < 1.5 && N.y < 0.5) {
           // lit windows (coarse cells: these are ~8 km away)
           vec2 cell = vec2(floor(vW.y / 7.0), floor((vW.x + vW.z*0.7) / 6.0));
@@ -489,11 +510,30 @@ function buildSkyline() {
     const x = c.x + gauss() * c.sx, z = c.z + gauss() * c.sz;
     const core = 1 - Math.min(1, Math.abs(x - c.x) / (c.sx * 1.3));
     const h = c.hmin + Math.pow(rnd(), 1.6) * (c.hmax - c.hmin) * (0.45 + 0.55 * core);
-    const w = 30 + rnd() * 30;
-    if (rnd() < 0.3) { // stepped tower
-      box(x, z, w * 1.4, w * 1.3, h * 0.45, 0);
-      box(x, z, w, w, h, 0);
+    const w = 30 + rnd() * 30, r0 = rnd();
+    if (h > 120 && rnd() < 0.5) box(x, z, w * 2.2, w * 1.8, 18 + rnd() * 14, 0); // podium
+    if (r0 < 0.2) { // round / octagonal tower
+      const g = new THREE.CylinderGeometry(w * 0.5, w * 0.55, h, rnd() < 0.5 ? 8 : 20); g.rotateY(rnd()); g.translate(x, h / 2, z);
+      parts.push(tagged(g, 0.2 + rnd() * 0.6, h, 0, x));
+    } else if (r0 < 0.45) { // stepped setbacks
+      box(x, z, w * 1.3, w * 1.2, h * 0.55, 0);
+      box(x, z, w, w * 0.95, h * 0.85, 0);
+      box(x, z, w * 0.7, w * 0.7, h, 0);
     } else box(x, z, w, w * (0.8 + rnd() * 0.5), h, 0, (rnd() - 0.5) * 0.3);
+    if (h > 150) { // crown + mast
+      box(x, z, w * 0.55, w * 0.55, h + 6 + rnd() * 10, 0);
+      if (rnd() < 0.45) { const g = new THREE.CylinderGeometry(0.6, 1.4, 30 + rnd() * 40, 5); g.translate(x, h + 30, z); parts.push(tagged(g, 0.5, h, 0, x)); }
+    }
+  }
+  // rows of identical residential towers (Nanshan / Shekou style)
+  for (let r = 0; r < 16; r++) {
+    const x0 = (rnd() * 2 - 1) * 14000, z0 = -4500 - rnd() * 2400, n = 4 + Math.floor(rnd() * 5);
+    const h = 85 + rnd() * 90, rot = (rnd() - 0.5) * 0.3, sd = 0.01 + rnd() * 0.02;
+    for (let k = 0; k < n; k++) {
+      const g = new THREE.BoxGeometry(32, h, 17); g.rotateY(rot); g.translate(x0 + k * 55, h / 2, z0 + k * 6);
+      parts.push(tagged(g, sd, h, 0, x0));
+      const cap = new THREE.BoxGeometry(14, 6, 10); cap.translate(x0 + k * 55, h + 3, z0 + k * 6); parts.push(tagged(cap, sd, h, 0, x0));
+    }
   }
   // Ping An Finance Centre — 599 m, tapering octagon + spire
   {
@@ -516,6 +556,12 @@ function buildSkyline() {
   {
     const g = new THREE.BoxGeometry(46000, 10, 7000); g.translate(0, 2, -7700);
     parts.push(tagged(g, 0.1, 0, 3, 0));
+    const blob = new THREE.IcosahedronGeometry(1, 0);
+    for (let x = -17000; x < 17000; x += 9 + rnd() * 10) {
+      const r = 5 + rnd() * 8, t = blob.clone();
+      t.scale(r * (1.2 + rnd() * 0.6), r * (0.6 + rnd() * 0.5), r); t.translate(x, 6 + r * 0.4, -4215 - rnd() * 60);
+      parts.push(tagged(t, rnd(), 0, 2, x));
+    }
   }
   return mergeGeometries(parts);
 }
@@ -681,6 +727,10 @@ scene.add(water);
 // ---------------------------------------------------------------- lights for near objects
 const hemi = new THREE.HemisphereLight(0x8899cc, 0x332a28, 1.0);
 const sun = new THREE.DirectionalLight(0xffaa77, 1.0);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -48, right: 48, top: 30, bottom: -30, near: 1, far: 400 });
+sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03;
 scene.add(hemi, sun, sun.target);
 
 // ---------------------------------------------------------------- beach
@@ -689,7 +739,7 @@ scene.add(hemi, sun, sun.target);
   g.rotateX(-Math.PI / 2);
   g.translate(0, 0, -12 + 45 - 33);
   const p = g.attributes.position, col = [];
-  const wet = new THREE.Color(0.13, 0.11, 0.09), dry = new THREE.Color(0.33, 0.27, 0.21), c = new THREE.Color();
+  const wet = new THREE.Color(0.26, 0.22, 0.18), dry = new THREE.Color(0.66, 0.56, 0.44), c = new THREE.Color();
   for (let i = 0; i < p.count; i++) {
     const z = p.getZ(i);
     p.setY(i, (z + 14) * 0.035 + (z < -14 ? (z + 14) * 0.03 : 0));
@@ -697,90 +747,90 @@ scene.add(hemi, sun, sun.target);
   }
   g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
   g.computeVertexNormals();
-  scene.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true })));
+  const sand = sandTextures();
+  const m = new THREE.MeshLambertMaterial({ vertexColors: true, map: sand.map, bumpMap: sand.bump, bumpScale: 2.5 });
+  const beach = new THREE.Mesh(g, m); beach.receiveShadow = true;
+  scene.add(beach);
 }
 const groundY = (z) => (z + 14) * 0.035;
+// procedural sand: fine grain, wind ripples, scattered footprints
+function sandTextures() {
+  const N = 512, c = document.createElement('canvas'); c.width = c.height = N;
+  const x = c.getContext('2d'), img = x.createImageData(N, N);
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const rip = Math.sin((i * 0.9 + Math.sin(j * 0.05) * 9 + Math.sin(i * 0.013) * 20) * 0.32) * 0.5 + 0.5;
+    const v = 215 + (Math.random() - 0.5) * 44 + rip * 14;
+    const o = (j * N + i) * 4; img.data[o] = img.data[o + 1] = img.data[o + 2] = v; img.data[o + 3] = 255;
+  }
+  x.putImageData(img, 0, 0);
+  x.fillStyle = 'rgba(120,120,120,0.3)';
+  for (let k = 0; k < 70; k++) {
+    let px = Math.random() * N, py = Math.random() * N; const a = Math.random() * 6.28;
+    for (let st = 0; st < 6; st++) {
+      const side = st % 2 ? 1 : -1;
+      x.beginPath(); x.ellipse(px + Math.cos(a + 1.57) * 4 * side, py + Math.sin(a + 1.57) * 4 * side, 3, 6.5, a + 1.57, 0, 6.28); x.fill();
+      px += Math.cos(a) * 14; py += Math.sin(a) * 14;
+    }
+  }
+  const map = new THREE.CanvasTexture(c);
+  map.colorSpace = THREE.SRGBColorSpace;
+  map.wrapS = map.wrapT = THREE.RepeatWrapping; map.repeat.set(120, 18); map.anisotropy = 8;
+  const bump = map.clone(); bump.colorSpace = THREE.NoColorSpace; bump.needsUpdate = true;
+  return { map, bump };
+}
 
 // ---------------------------------------------------------------- people, cyclists, lamp, birds
-const dark = (h) => new THREE.MeshLambertMaterial({ color: h });
-const clothes = [0x1c1d24, 0x2b2a30, 0x3a3e4a, 0x5a4a44, 0x24303a, 0x6b6f78, 0x4a2c2c, 0x30362e, 0x8a8f96];
-const skin = dark(0x5a4236), hair = dark(0x15130f);
-const G = {
-  torso: new THREE.CapsuleGeometry(0.17, 0.42, 4, 8),
-  head: new THREE.SphereGeometry(0.115, 10, 8),
-  limb: new THREE.CapsuleGeometry(0.055, 0.68, 3, 6).translate(0, -0.37, 0),
-  arm: new THREE.CapsuleGeometry(0.042, 0.52, 3, 6).translate(0, -0.29, 0),
-  wheel: new THREE.TorusGeometry(0.34, 0.025, 6, 22),
-  bar: new THREE.CylinderGeometry(0.02, 0.02, 1, 5),
-};
-const metal = dark(0x16171a);
-
-function makePerson(scale = 1) {
-  const grp = new THREE.Group();
-  const top = dark(clothes[Math.floor(rnd() * clothes.length)]);
-  const bot = dark(clothes[Math.floor(rnd() * 4)]);
-  const body = new THREE.Group(); grp.add(body);
-  const torso = new THREE.Mesh(G.torso, top); torso.position.y = 1.2; torso.scale.set(1, 1, 0.7); body.add(torso);
-  const head = new THREE.Mesh(G.head, rnd() < 0.5 ? hair : skin); head.position.y = 1.62; body.add(head);
-  const legs = [], arms = [];
-  for (const s of [-1, 1]) {
-    const leg = new THREE.Mesh(G.limb, bot); leg.position.set(0.09 * s, 0.86, 0); body.add(leg); legs.push(leg);
-    const arm = new THREE.Mesh(G.arm, top); arm.position.set(0.22 * s, 1.43, 0); body.add(arm); arms.push(arm);
-  }
-  grp.scale.setScalar(scale);
-  return { grp, body, legs, arms };
-}
+const metal = new THREE.MeshLambertMaterial({ color: 0x16171a });
+const G = { bar: new THREE.CylinderGeometry(0.012, 0.012, 1, 5) };
 
 const walkers = [];
 function addWalker(opts = {}) {
-  const p = makePerson(opts.scale ?? (0.9 + rnd() * 0.2));
+  const h = makeHuman(rnd, opts);
   const z = opts.z ?? (-1 - rnd() * 12.5);
+  const run = opts.run ?? 0;
   const w = {
-    ...p, kind: opts.kind ?? 'walk', x: opts.x ?? (rnd() * 2 - 1) * 55, z,
-    v: opts.v ?? (rnd() < 0.5 ? -1 : 1) * (0.9 + rnd() * 0.7), ph: rnd() * 6.28,
+    h, kind: opts.kind ?? 'walk', x: opts.x ?? (rnd() * 2 - 1) * 55, z, run, seed: rnd(),
+    v: opts.v ?? (rnd() < 0.5 ? -1 : 1) * (1.05 + rnd() * 0.45) * (run ? 2.6 : 1), ph: rnd() * 6.28,
+    face: opts.face ?? Math.PI + (rnd() - 0.5) * 1.2,
   };
-  if (w.kind === 'stand') w.v = 0;
-  scene.add(p.grp);
+  if (w.kind !== 'walk') w.v = 0;
+  h.root.rotation.y = w.kind === 'walk' ? (w.v > 0 ? Math.PI / 2 : -Math.PI / 2) : w.face;
+  scene.add(h.root);
   walkers.push(w);
   return w;
 }
-for (let i = 0; i < 34; i++) addWalker();
-for (let i = 0; i < 12; i++) addWalker({ kind: 'stand' });
-// a pair of kids running at the water's edge
-for (let i = 0; i < 3; i++) addWalker({ scale: 0.6, z: -12.5 - rnd(), v: (rnd() < 0.5 ? -1 : 1) * 2.4 });
+for (let i = 0; i < 26; i++) addWalker();
+// couples walking side by side
+for (let i = 0; i < 4; i++) {
+  const a = addWalker(); addWalker({ x: a.x + 0.15, z: a.z - 0.6, v: a.v, female: !a.h.female });
+}
+const idleKinds = ['stand', 'phone', 'phone', 'hands', 'stand', 'sit', 'phone', 'stand', 'sit', 'hands', 'stand', 'phone'];
+idleKinds.forEach((k, i) => addWalker({ kind: k, x: (rnd() * 2 - 1) * 30, z: k === 'sit' ? -6 - rnd() * 5 : -2 - rnd() * 10 }));
+// kids running at the water's edge
+for (let i = 0; i < 3; i++) addWalker({ child: true, run: 1, z: -12.3 - rnd() * 0.8, v: (rnd() < 0.5 ? -1 : 1) * 2.8 });
 
 // photographer with a tripod (as in the reference)
 {
-  const w = addWalker({ kind: 'stand', x: -6.5, z: -1.5, scale: 1 });
-  w.grp.rotation.y = Math.PI;
+  addWalker({ kind: 'hands', x: -6.5, z: -1.6, face: Math.PI, female: false });
   const tri = new THREE.Group();
   for (let k = 0; k < 3; k++) {
-    const leg = new THREE.Mesh(G.bar, metal); leg.scale.y = 1.5;
-    const a = k / 3 * Math.PI * 2;
-    leg.position.set(Math.cos(a) * 0.22, 0.72, Math.sin(a) * 0.22); leg.rotation.set(Math.sin(a) * 0.3, 0, -Math.cos(a) * 0.3);
+    const leg = new THREE.Mesh(G.bar, metal); leg.scale.y = 1.45; leg.castShadow = true;
+    const a = k / 3 * Math.PI * 2 + 0.4;
+    leg.position.set(Math.cos(a) * 0.2, 0.7, Math.sin(a) * 0.2); leg.rotation.set(Math.sin(a) * 0.28, 0, -Math.cos(a) * 0.28);
     tri.add(leg);
   }
-  const cam = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.11, 0.1), metal); cam.position.y = 1.48; tri.add(cam);
-  tri.position.set(-6.5, groundY(-2.3), -2.3); scene.add(tri);
+  const cam = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.1, 0.09), metal); cam.position.y = 1.44; cam.castShadow = true; tri.add(cam);
+  const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.14, 8), metal); lens.rotation.x = Math.PI / 2; lens.position.set(0, 1.44, -0.1); tri.add(lens);
+  tri.position.set(-6.5, groundY(-2.4), -2.4); scene.add(tri);
 }
 
 const cyclists = [];
 for (let i = 0; i < 9; i++) {
-  const grp = new THREE.Group();
-  const rider = makePerson(1);
-  rider.body.position.set(-0.05, 0.12, 0); rider.body.rotation.x = 0;
-  rider.body.children[0].rotation.x = -0.45; rider.body.children[0].position.set(0, 1.18, 0.12);
-  rider.body.children[1].position.set(0, 1.5, 0.32);
-  for (const a of rider.arms) { a.position.z = 0.15; a.rotation.x = -1.0; }
-  grp.add(rider.grp);
-  const wheels = [];
-  for (const z of [-0.55, 0.55]) { const wh = new THREE.Mesh(G.wheel, metal); wh.rotation.y = Math.PI / 2; wh.position.set(0, 0.34, z); grp.add(wh); wheels.push(wh); }
-  const frame = new THREE.Mesh(G.bar, metal); frame.scale.y = 1.1; frame.rotation.x = Math.PI / 2; frame.position.set(0, 0.62, 0); grp.add(frame);
-  const fork = new THREE.Mesh(G.bar, metal); fork.scale.y = 0.75; fork.position.set(0, 0.68, 0.48); fork.rotation.x = 0.3; grp.add(fork);
+  const c = makeCyclist(rnd);
   const dir = rnd() < 0.5 ? -1 : 1;
-  grp.rotation.y = dir > 0 ? Math.PI / 2 : -Math.PI / 2;
-  const c = { grp, rider, wheels, x: (rnd() * 2 - 1) * 60, z: -4.5 - rnd() * 7, v: dir * (3.2 + rnd() * 2.2), ph: rnd() * 6.28 };
-  scene.add(grp);
+  c.bike.rotation.y = dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+  Object.assign(c, { x: (rnd() * 2 - 1) * 60, z: -4.5 - rnd() * 7, v: dir * (3.0 + rnd() * 2.0), ph: rnd() * 6.28 });
+  scene.add(c.bike);
   cyclists.push(c);
 }
 
@@ -863,13 +913,13 @@ function updateSim(dt) {
   water.material.uniforms.uTime.value = performance.now() / 1000;
 
   // near lighting follows the sky
-  sun.position.copy(sunDir).multiplyScalar(100).add(camera.position);
-  sun.target.position.copy(camera.position);
-  sun.color.copy(jsSunLight(s, tmpC)).multiplyScalar(0.35);
+  sun.target.position.set(0, 0, -6);
+  sun.position.copy(sunDir).multiplyScalar(160).add(sun.target.position);
+  sun.color.copy(jsSunLight(s, tmpC)).multiplyScalar(0.75 * smooth(-0.01, 0.02, s));
   sun.intensity = 1;
   hemi.color.setRGB(lerp(0.06, 0.55, day), lerp(0.08, 0.6, day), lerp(0.18, 0.85, day));
   hemi.groundColor.setRGB(lerp(0.03, 0.32, day), lerp(0.025, 0.26, day), lerp(0.03, 0.24, day));
-  hemi.intensity = 1.2;
+  hemi.intensity = 1.0;
   renderer.toneMappingExposure = lerp(0.82, 2.1, night);
 
   const lampOn = smooth(-0.005, -0.05, s);
@@ -884,31 +934,23 @@ function updateSim(dt) {
 }
 
 function updateLife(dt) {
+  const now = performance.now() / 1000;
   for (const w of walkers) {
     if (w.kind === 'walk') {
       w.x += w.v * dt;
       if (w.x > 60) w.x = -60; if (w.x < -60) w.x = 60;
-      w.ph += Math.abs(w.v) * dt * 4.2 / w.grp.scale.x;
-      const sw = Math.sin(w.ph) * 0.5;
-      w.legs[0].rotation.x = sw; w.legs[1].rotation.x = -sw;
-      w.arms[0].rotation.x = -sw * 0.8; w.arms[1].rotation.x = sw * 0.8;
-      w.body.position.y = Math.abs(Math.cos(w.ph)) * 0.04;
-      w.grp.rotation.y = w.v > 0 ? Math.PI / 2 : -Math.PI / 2;
-    } else {
-      w.ph += dt * 0.6;
-      w.arms[1].rotation.x = -0.3 + Math.sin(w.ph) * 0.05;
-      if (!w.facing) { w.facing = true; w.grp.rotation.y = Math.PI + (rnd() - 0.5) * 1.4; }
-    }
-    w.grp.position.set(w.x, groundY(w.z), w.z);
+      w.ph += Math.abs(w.v) * dt * (w.run ? 2.2 : 2.9) / w.h.H;
+      poseWalk(w.h, w.ph, w.run);
+    } else poseIdle(w.h, w.kind, now, w.seed);
+    w.h.root.position.set(w.x, groundY(w.z), w.z);
   }
   for (const c of cyclists) {
     c.x += c.v * dt;
     if (c.x > 65) c.x = -65; if (c.x < -65) c.x = 65;
     c.ph += Math.abs(c.v) * dt / 0.34;
-    for (const wh of c.wheels) wh.rotation.x = -c.ph;
-    const pd = c.ph * 0.4;
-    c.rider.legs[0].rotation.x = -1.0 + Math.sin(pd) * 0.6; c.rider.legs[1].rotation.x = -1.0 - Math.sin(pd) * 0.6;
-    c.grp.position.set(c.x, groundY(c.z), c.z);
+    for (const wh of c.wheels) wh.rotation.x = c.ph;
+    poseRide(c, c.ph / 2.4);
+    c.bike.position.set(c.x, groundY(c.z), c.z);
   }
   // birds: a loose flock drifting along the bay
   state.birdT += dt;
@@ -1006,6 +1048,7 @@ function renderFrame(dt) {
   renderer.render(skyScene, skyCam);
   skyUniforms.uToon.value = state.sketch ? 1 : 0;
   if (state.sketch) {
+    renderer.shadowMap.needsUpdate = true;
     renderer.setRenderTarget(sceneRT);
     renderer.render(scene, camera);
     renderer.setRenderTarget(null);
@@ -1013,6 +1056,7 @@ function renderFrame(dt) {
     postMat.uniforms.uExposure.value = renderer.toneMappingExposure / 0.6; // match three's ACES exposure scale
     renderer.render(postScene, skyCam);
   } else {
+    renderer.shadowMap.needsUpdate = true;
     renderer.setRenderTarget(null);
     renderer.render(scene, camera);
   }
