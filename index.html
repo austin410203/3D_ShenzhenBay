@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>深圳灣・晚霞縮時</title>
+<meta name="description" content="three.js 即時體積雲 × 海面倒影：深圳灣公園的晚霞縮時">
+<style>
+  :root { --fg: #f4ede6; --dim: rgba(244,237,230,.62); --glass: rgba(18,20,32,.42); }
+  html, body { margin: 0; height: 100%; background: #0d1020; overflow: hidden; color: var(--fg);
+    font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif; }
+  canvas { display: block; touch-action: none; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  #title { position: fixed; left: 20px; top: 16px; pointer-events: none; text-shadow: 0 1px 8px rgba(0,0,0,.35); }
+  #title h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: .12em; }
+  #title p { margin: 4px 0 0; font-size: 12px; color: var(--dim); letter-spacing: .08em; }
+  #clock { position: fixed; right: 20px; top: 14px; font: 600 28px/1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+    letter-spacing: .06em; text-shadow: 0 1px 10px rgba(0,0,0,.35); pointer-events: none; }
+  #clock small { display: block; font: 500 11px/1.4 inherit; font-family: inherit; color: var(--dim); text-align: right; letter-spacing: .1em; margin-top: 4px; }
+  #bar { position: fixed; left: 50%; bottom: max(16px, env(safe-area-inset-bottom)); transform: translateX(-50%);
+    width: min(680px, calc(100% - 32px)); box-sizing: border-box; display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-radius: 14px; background: var(--glass); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,.08); }
+  #bar button { flex: none; height: 32px; min-width: 32px; padding: 0 10px; border-radius: 8px; border: 0; cursor: pointer;
+    background: rgba(255,255,255,.1); color: var(--fg); font: 500 13px/1 inherit; font-family: inherit; }
+  #bar button:hover { background: rgba(255,255,255,.18); }
+  #bar button.on { background: rgba(255,170,130,.35); }
+  #t { flex: 1; min-width: 60px; accent-color: #ffb08a; }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; background: #0d1020; font-size: 14px;
+    letter-spacing: .2em; color: var(--dim); transition: opacity .8s; }
+  #hint { position: fixed; left: 20px; bottom: 76px; font-size: 11px; color: var(--dim); pointer-events: none; transition: opacity 1s; }
+  @media (max-width: 560px) {
+    #title h1 { font-size: 16px; } #title p { display: none; } #clock { font-size: 20px; } #hint { display: none; }
+    #bar { gap: 6px; padding: 8px 10px; } #bar button { padding: 0 8px; font-size: 12px; }
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="title"><h1>深圳灣・晚霞</h1><p>Shenzhen Bay · hand-drawn time-lapse</p></div>
+<div id="clock">17:15<small>日落前</small></div>
+<div id="hint">拖曳環顧 · 滾輪縮放</div>
+<div id="bar">
+  <button id="play" title="播放 / 暫停">❚❚</button>
+  <input id="t" type="range" min="0" max="1000" value="0" aria-label="時間">
+  <button id="speed" title="縮時速度">1×</button>
+  <button id="style" title="切換手繪 / 寫實">手繪</button>
+  <button id="show" title="天際線燈光秀">燈光秀</button>
+</div>
+<div id="loading">生成雲層中…</div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
